@@ -19,6 +19,7 @@ class User(Base):
     name: Mapped[str | None] = mapped_column(String(200))
     picture_url: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    terms_accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuthSession(Base):
@@ -38,6 +39,15 @@ class GoogleAccount(Base):
     refresh_token_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id_usage: Mapped[int] = mapped_column(primary_key=True)
+    id_user: Mapped[int] = mapped_column(ForeignKey("users.id_user", ondelete="CASCADE"), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class UserCv(Base):
     __tablename__ = "user_cvs"
 
@@ -46,4 +56,5 @@ class UserCv(Base):
     content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     candidate_name: Mapped[str | None] = mapped_column(String(200))
     skills_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    profile_json: Mapped[str | None] = mapped_column(Text)
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

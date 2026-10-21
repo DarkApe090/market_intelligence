@@ -1,6 +1,9 @@
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
+
+OutreachStatus = Literal["to_contact", "sent", "replied", "no_email", "rejected"]
 
 class CreateContact(BaseModel):
     name_contact: str | None = None
@@ -37,7 +40,29 @@ class OutreachContactResponse(ContactResponse):
     name_company: str
     website_url: str | None = None
     job_title: str | None = None
-    outreach_status: Literal["to_contact", "sent", "replied", "no_email"]
+    id_jobPosting: int | None = None
+    job_seen_at: datetime | None = None
+    outreach_status: OutreachStatus
+    sent_at: datetime | None = None
 
 class OutreachStatusUpdate(BaseModel):
-    outreach_status: Literal["to_contact", "sent", "replied", "no_email"]
+    outreach_status: OutreachStatus
+
+
+class ApplyOutreachRequest(BaseModel):
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=10_000)
+
+    model_config = {"str_strip_whitespace": True}
+
+
+class ContactReplyResponse(BaseModel):
+    sender: str = ""
+    subject: str = ""
+    body: str = ""
+    sent_at: str | None = None
+    outreach_status: OutreachStatus | None = None
+
+
+class ApplyOutreachResponse(BaseModel):
+    to: str

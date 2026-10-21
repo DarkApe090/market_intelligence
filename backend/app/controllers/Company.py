@@ -5,7 +5,8 @@ from app.models.User import User
 from app.services.Auth import get_current_user
 from app.schemas.Company import (CreateCompany, UpdateCompany, CompanyResponse, FindEmailRequest)
 from app.services.Company import (create_company, get_company, get_companies, update_company, delete_company)
-from app.services.ContactEnrichment import enrich_company
+from app.services.ContactEnrichment import enrich_company, save_company_email
+from app.services.Quota import consume_quota
 
 
 router = APIRouter(
@@ -74,7 +75,16 @@ def find_email(
             detail = "Company not found"
         )
 
-    background_tasks.add_task(enrich_company, id_company, request.website_url, True)
+    website = request.website_url
+    if website and "@" in website and "://" not in website:
+        try:
+            save_company_email(db, id_company, website)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"email": website}
+
+    consume_quota(db, user, "find_email")
+    background_tasks.add_task(enrich_company, id_company, website, True)
 
     return {"message": "Pesquisa de email iniciada"}
 

@@ -1,173 +1,24 @@
 from io import BytesIO
+from xml.etree import ElementTree as ET
+import html
+import logging
 import re
 import unicodedata
+import zipfile
 
 from docx import Document
 from pypdf import PdfReader
 
-from app.scrappers.job_sources import search_all_sources
+from app.ai.llm import LLMError, chat_json
+
+logger = logging.getLogger(__name__)
 
 
 MAX_CV_BYTES = 5 * 1024 * 1024
 MAX_SEARCH_AREAS = 3
-JOBS_PER_AREA = 20
-LOCATION_ALIASES = {
-    "lisboa": {"lisboa", "lisbon", "portugal", "pt"},
-    "lisbon": {"lisboa", "lisbon", "portugal", "pt"},
-    "porto": {"porto", "portugal", "pt"},
-    "braga": {"braga", "portugal", "pt"},
-    "coimbra": {"coimbra", "portugal", "pt"},
-    "aveiro": {"aveiro", "portugal", "pt"},
-    "faro": {"faro", "portugal", "pt"},
-    "madeira": {"madeira", "portugal", "pt"},
-    "azores": {"azores", "acores", "portugal", "pt"},
-}
-REGION_COUNTRIES = {
-    "europe": {
-        "albania", "andorra", "austria", "belarus", "belgium", "bosnia",
-        "bulgaria", "croatia", "cyprus", "czechia", "denmark", "estonia",
-        "finland", "france", "germany", "greece", "hungary", "iceland",
-        "ireland", "italy", "kosovo", "latvia", "liechtenstein", "lithuania",
-        "luxembourg", "malta", "moldova", "monaco", "montenegro", "netherlands",
-        "north macedonia", "norway", "poland", "portugal", "romania", "san marino",
-        "serbia", "slovakia", "slovenia", "spain", "sweden", "switzerland",
-        "uk", "ukraine", "united kingdom", "vatican city", "pt",
-    },
-    "emea": {"europe", "middle east", "africa", "portugal", "pt"},
-    "eu": {"europe", "portugal", "pt"},
-}
-REMOTE_LOCATIONS = {"remote", "worldwide", "global", "anywhere", "remote worldwide"}
-KNOWN_LOCATIONS = {
-    "argentina", "australia", "brazil", "brasil", "canada", "china", "india",
-    "japan", "mexico", "new zealand", "singapore", "south korea", "usa",
-    "united states", "united states of america", "portugal", "pt", "lisbon",
-    "lisboa", "porto", "braga", "coimbra", "aveiro", "faro", "madeira",
-    "azores", "acores", "europe", "emea", "eu", "latam", "latin america",
-    "north america", "apac", "asia pacific", "middle east", "africa", "uk",
-    "united kingdom", "spain", "france", "germany", "netherlands", "ireland",
-}
 
-CAREER_AREAS = [
-    {
-        "key": "software_engineering",
-        "name": "Engenharia de Software",
-        "search_query": "engenheiro de software",
-        "search_tag": "software",
-        "industries": ("software engineering",),
-        "role_terms": (
-            "engenheiro de software",
-            "engenheira de software",
-            "engenheiro/a de software",
-            "software engineer",
-            "engenharia de software",
-            "engenheiro informatico",
-            "engenheira informatica",
-            "engenharia informatica",
-            "software developer",
-            "desenvolvedor de software",
-            "programador de software",
-            "software engineering",
-            "full stack developer",
-            "full stack engineer",
-            "full-stack engineer",
-            "frontend developer",
-            "frontend engineer",
-            "frontend engineering",
-            "front end engineer",
-            "backend developer",
-            "backend engineer",
-            "backend engineering",
-            "back end engineer",
-            "fullstack developer",
-        ),
-        "skill_terms": (
-            "python", "java", "typescript", "javascript", "react", "node.js",
-            "c#", ".net", "sql", "docker", "git", "angular", "kotlin",
-        ),
-    },
-    {
-        "key": "data_ai",
-        "name": "Dados e Inteligência Artificial",
-        "search_query": "engenheiro de dados machine learning",
-        "search_tag": "data",
-        "industries": ("data science", "data analytics", "artificial intelligence"),
-        "role_terms": (
-            "cientista de dados", "data scientist", "engenheiro de dados",
-            "data engineer", "machine learning engineer", "engenharia de dados",
-            "inteligencia artificial", "artificial intelligence",
-        ),
-        "skill_terms": (
-            "machine learning", "deep learning", "pandas", "pytorch",
-            "tensorflow", "scikit-learn", "generative ai",
-        ),
-    },
-    {
-        "key": "cybersecurity",
-        "name": "Cibersegurança",
-        "search_query": "analista cibersegurança",
-        "search_tag": "cybersecurity",
-        "industries": ("cybersecurity",),
-        "role_terms": (
-            "ciberseguranca", "cybersecurity", "seguranca informatica",
-            "security engineer", "analista de seguranca", "penetration tester",
-        ),
-        "skill_terms": (
-            "siem", "penetration testing", "incident response", "soc analyst",
-            "kali linux", "owasp",
-        ),
-    },
-    {
-        "key": "cloud_devops",
-        "name": "Cloud e DevOps",
-        "search_query": "engenheiro DevOps cloud",
-        "search_tag": "devops",
-        "industries": ("devops", "infrastructure"),
-        "role_terms": (
-            "devops engineer", "engenheiro devops", "site reliability engineer",
-            "platform engineer", "cloud engineer", "engenheiro cloud",
-        ),
-        "skill_terms": (
-            "kubernetes", "terraform", "aws", "azure", "google cloud",
-            "jenkins", "ci/cd", "infrastructure as code",
-        ),
-    },
-    {
-        "key": "product_design",
-        "name": "Produto e UX/UI Design",
-        "search_query": "product designer UX UI",
-        "search_tag": "design",
-        "industries": ("product", "design"),
-        "role_terms": (
-            "product designer", "ux designer", "ui designer", "ux/ui designer",
-            "product manager", "gestor de produto", "design de produto",
-        ),
-        "skill_terms": ("figma", "user research", "usability testing", "wireframes"),
-    },
-    {
-        "key": "marketing",
-        "name": "Marketing e Comunicação",
-        "search_query": "marketing digital",
-        "search_tag": "marketing",
-        "industries": ("marketing", "communications"),
-        "role_terms": (
-            "marketing manager", "digital marketing", "marketing digital",
-            "gestor de marketing", "communication specialist", "comunicacao",
-        ),
-        "skill_terms": ("seo", "sem", "google analytics", "content marketing"),
-    },
-    {
-        "key": "finance",
-        "name": "Finanças e Contabilidade",
-        "search_query": "analista financeiro contabilista",
-        "search_tag": "finance",
-        "industries": ("finance", "accounting"),
-        "role_terms": (
-            "financial analyst", "analista financeiro", "accountant",
-            "contabilista", "contabilidade", "financas",
-        ),
-        "skill_terms": ("contabilidade", "financial modeling", "sap fi", "auditoria"),
-    },
-]
+IMAGE_KINDS = {"jpg", "jpeg", "png", "webp"}
+
 
 SECTION_NAMES = {
     "experiencia": ("experiência", "experiencia profissional", "professional experience", "experience"),
@@ -185,260 +36,446 @@ def _normalize(value: str) -> str:
 
 
 def _has_term(normalized_text: str, term: str) -> bool:
-    return re.search(rf"(?<![a-z0-9]){re.escape(_normalize(term))}(?![a-z0-9])", normalized_text) is not None
+    folded = _normalize(term)
+    if not folded:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(folded)}(?![a-z0-9])", normalized_text) is not None
 
+STOPWORDS = {
+    "a", "as", "o", "os", "um", "uma", "de", "da", "do", "das", "dos", "e", "em",
+    "com", "para", "por", "na", "no", "the", "and", "or", "to", "of", "in", "on",
+    "at", "for", "with", "cv", "curriculum", "vitae", "experiencia", "formacao",
+}
 
-# Tecnologias que, se aparecerem no título da vaga e não estiverem no CV, indicam outra stack.
-OTHER_STACK_TERMS = (
-    ".net", "c#", "java", "php", "ruby", "golang", "scala", "kotlin", "swift", "c++",
-    "angular", "vue", "salesforce", "sap", "wordpress", "drupal", "laravel", "elixir",
-    "android", "ios", "unity", "unreal",
+PROFILE_SYSTEM = (
+    "Extract a job-search profile from the CV. Reply only with JSON. "
+    "candidate_name is the person's name. areas[].name is the profession or role "
+    "(e.g. Software Developer), never the person's name. "
+    "matched_skills is 5 to 12 short tools or skills (React, Python, SQL), never "
+    "hobbies or full sentences. "
+    "languages lists spoken languages written in the CV, as written and in English "
+    "(Inglês and English). Empty if the CV does not list any. Never infer a language. "
+    "search_tag is 2 to 4 words in the CV language to search job boards "
+    "(psicólogo clínico, carpinteiro, software developer). "
+    "role_terms are usual job titles for this trade in the CV language and in English "
+    "(programador and software developer, or carpinteiro and carpenter). "
+    "Do not assume a technology career: a carpenter must be labelled carpenter. "
+    "Use only facts written in the CV. "
+    'Schema: {"candidate_name": string|null, "languages": [string], '
+    '"areas":[{"key": slug, "name": string, '
+    '"search_query": string, "search_tag": string, "industries": [string], '
+    '"role_terms": [string], "matched_skills": [string], '
+    '"confidence": "high"|"medium"|"low", '
+    '"evidence": [{"text": quote, "section": "experiencia"|"formacao"|"competencias"|"perfil"}]}]}. '
+    "Return 1 to 3 areas."
 )
 
+SKILL_SECTION_STOP = {"hobbies", "hobby", "languages", "idiomas", "interests", "interesses"}
 
-def _location_priority(job_location: str, requested_location: str) -> int | None:
-    location_parts = {
-        _normalize(part)
-        for part in re.split(r"[,;/|]", job_location)
-        if _normalize(part)
-    }
-    if not location_parts:
-        return 4
 
-    requested = _normalize(requested_location)
-    requested_aliases = LOCATION_ALIASES.get(requested, {requested})
-    matching_locations = location_parts.intersection(requested_aliases)
-    if matching_locations:
-        return 0 if location_parts.issubset(requested_aliases) else 1
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", _normalize(value)).strip("_")
+    return slug[:60] or "perfil"
 
-    remote_match = bool(location_parts.intersection(REMOTE_LOCATIONS))
-    region_matches = any(
-        region in location_parts and requested_aliases.intersection(countries)
-        for region, countries in REGION_COUNTRIES.items()
+
+def _looks_like_person_name(line: str) -> bool:
+    words = line.split()
+    return (
+        2 <= len(words) <= 5
+        and len(line) <= 60
+        and not re.search(r"[\d@:/|,]", line)
+        and all(word[0].isalpha() for word in words)
     )
-    known_regions = set(REGION_COUNTRIES)
-    specific_locations = location_parts.intersection(KNOWN_LOCATIONS - known_regions - REMOTE_LOCATIONS)
 
-    if specific_locations:
+
+def _same_person(line: str, candidate_name: str | None) -> bool:
+    return bool(candidate_name) and _normalize(line) == _normalize(candidate_name)
+
+
+def _is_dump(line: str) -> bool:
+    return len(line) > 80 or len(line.split()) > 8
+
+
+def _usable_title(line: str, candidate_name: str | None) -> bool:
+    text = line.strip()
+    return bool(text) and not _same_person(text, candidate_name) and not _is_dump(text)
+
+
+def _string_list(value) -> list[str]:
+    if isinstance(value, str):
+        value = re.split(r"[,;/|•·]", value)
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip()))
+
+
+def _skill_pieces(values) -> list[str]:
+    pieces = []
+    for skill in _string_list(values):
+        if len(skill) > 40:
+            pieces.extend(part.strip() for part in re.split(r"[\s,/]+", skill) if part.strip())
+        else:
+            pieces.append(skill)
+    return pieces
+
+
+def _clean_skills(values, candidate_name: str | None = None) -> list[str]:
+    name_parts = {_normalize(part) for part in _tokens(candidate_name or "")}
+    cleaned = []
+    for skill in _skill_pieces(values):
+        folded = _normalize(skill)
+        if folded in SKILL_SECTION_STOP or folded.startswith("hobby"):
+            break
+        if folded in STOPWORDS or folded in name_parts:
+            continue
+        if not (2 <= len(skill) <= 40):
+            continue
+        cleaned.append(skill)
+        if len(cleaned) >= 12:
+            break
+    return cleaned
+
+
+def _finalize_area(area: dict, candidate_name: str | None) -> dict:
+    area["matched_skills"] = _clean_skills(area["matched_skills"], candidate_name)
+    if not _usable_title(area["name"], candidate_name):
+        replacement = next((term for term in area["role_terms"] if _usable_title(term, candidate_name)), None)
+        if not replacement:
+            replacement = next(
+                (item["text"] for item in area["evidence"] if _usable_title(item["text"], candidate_name)),
+                None,
+            )
+        if replacement:
+            area["name"] = replacement[:80]
+            area["key"] = _slug(replacement)
+        elif area["matched_skills"]:
+            area["name"] = " ".join(area["matched_skills"][:3])[:80]
+            area["key"] = _slug(area["name"])
+    tag = area.get("search_tag") or ""
+    if not _usable_title(tag, candidate_name):
+        source = next((term for term in area["role_terms"] if _usable_title(term, candidate_name)), area["name"])
+        area["search_tag"] = " ".join(_tokens(source)[:4]) or " ".join(area["matched_skills"][:4])
+    return area
+
+
+def _evidence_items(value) -> list[dict]:
+    items = []
+    if not isinstance(value, list):
+        return items
+    for item in value[:4]:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        section = str(item.get("section") or "perfil").strip()
+        if section not in SECTION_NAMES:
+            section = "perfil"
+        if text:
+            items.append({"text": text[:240], "section": section})
+    return items
+
+
+def _area_from_dict(item: dict) -> dict | None:
+    name = str(item.get("name") or "").strip()
+    if not name:
         return None
-
-    if remote_match and region_matches:
-        return 3
-
-    if region_matches:
-        return 2
-
-    if remote_match:
-        return 3
-
-    return None
-
-
-def extract_cv_text(filename: str, content: bytes) -> str:
-    extension = filename.rsplit(".", 1)[-1].casefold() if "." in filename else ""
-
-    if extension == "pdf":
-        pages = PdfReader(BytesIO(content)).pages
-        text = "\n".join(page.extract_text() or "" for page in pages)
-    elif extension == "docx":
-        document = Document(BytesIO(content))
-        paragraphs = [paragraph.text for paragraph in document.paragraphs]
-        table_cells = [cell.text for table in document.tables for row in table.rows for cell in row.cells]
-        text = "\n".join(paragraphs + table_cells)
-    else:
-        raise ValueError("Formato não suportado. Carrega um ficheiro PDF ou DOCX.")
-
-    text = text.strip()
-    if not text:
-        raise ValueError("Não foi possível extrair texto. PDFs digitalizados como imagem não são suportados nesta versão.")
-
-    return text[:100_000]
+    skills = _string_list(item.get("matched_skills") or item.get("skills"))
+    roles = _string_list(item.get("role_terms") or item.get("roles")) or [name]
+    search_query = str(item.get("search_query") or "").strip() or " ".join([name, *skills[:3]])
+    search_tag = str(item.get("search_tag") or "").strip() or name
+    confidence = item.get("confidence") if item.get("confidence") in {"high", "medium", "low"} else "medium"
+    return {
+        "key": _slug(str(item.get("key") or name)),
+        "name": name[:80],
+        "search_query": search_query[:180],
+        "search_tag": search_tag[:80],
+        "industries": _string_list(item.get("industries")),
+        "role_terms": roles,
+        "matched_skills": skills,
+        "confidence": confidence,
+        "evidence": _evidence_items(item.get("evidence")),
+    }
 
 
-def analyze_cv_text(text: str) -> list[dict]:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    current_section = "perfil"
+def _areas_from_payload(payload: dict) -> list[dict]:
+    raw = payload.get("areas") if isinstance(payload, dict) else None
+    if not isinstance(raw, list):
+        return []
+    areas = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        area = _area_from_dict(item)
+        if area:
+            areas.append(area)
+        if len(areas) >= MAX_SEARCH_AREAS:
+            break
+    return areas
+
+
+def _cv_sections(text: str) -> list[tuple[str, str]]:
     contextual_lines: list[tuple[str, str]] = []
-
-    for line in lines:
+    current_section = "perfil"
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
         normalized_line = _normalize(line)
         for section, headings in SECTION_NAMES.items():
             if normalized_line in {_normalize(heading) for heading in headings}:
                 current_section = section
                 break
-        contextual_lines.append((line, current_section))
+        else:
+            contextual_lines.append((line, current_section))
+    return contextual_lines
 
-    detections = []
-    for area in CAREER_AREAS:
-        evidence = []
-        score = 0
-        matched_roles = []
-        matched_skills = []
-        normalized_role_terms = tuple((term, _normalize(term)) for term in area["role_terms"])
-        normalized_skill_terms = tuple((term, _normalize(term)) for term in area["skill_terms"])
 
-        for line, section in contextual_lines:
-            normalized_line = _normalize(line)
-            matching_roles = [term for term, normalized in normalized_role_terms if normalized in normalized_line]
-            matching_skills = [term for term, normalized in normalized_skill_terms if normalized in normalized_line]
-            if matching_roles or matching_skills:
-                score += len(matching_roles) * 3 + len(matching_skills)
-                evidence.append({"text": line[:240], "section": section})
-                matched_roles.extend(term for term in matching_roles if term not in matched_roles)
-                matched_skills.extend(term for term in matching_skills if term not in matched_skills)
+def _tokens(value: str) -> list[str]:
+    return [
+        token
+        for token in re.findall(r"[A-Za-zÀ-ÿ0-9+#.]{3,}", value)
+        if _normalize(token) not in STOPWORDS
+    ]
 
-        if not evidence:
-            continue
 
-        query_role = matched_roles[0] if matched_roles else area["name"]
-        search_query = " ".join([query_role, *matched_skills[:3]])
+def _areas_from_cv_text(text: str, candidate_name: str | None = None) -> list[dict]:
+    """Fallback if Ollama is down: still uses the CV text, not a fixed career list."""
+    sections = _cv_sections(text)
+    if not sections:
+        return []
 
-        detections.append(
-            {
-                "key": area["key"],
-                "name": area["name"],
-                "search_query": search_query or area["search_query"],
-                "matched_skills": matched_skills,
-                "confidence": "high" if score >= 3 else "medium" if score >= 2 else "low",
-                "evidence": evidence[:4],
-            }
+    experience = [
+        line for line, section in sections
+        if section in {"experiencia", "perfil"} and not _same_person(line, candidate_name)
+    ]
+    formation = [line for line, section in sections if section == "formacao"]
+    skill_lines = [line for line, section in sections if section == "competencias"]
+    role_line = next((line for line in experience if not _is_dump(line)), None)
+    if not role_line:
+        role_line = formation[0] if formation else (experience[0] if experience else sections[0][0])
+    skill_sources = skill_lines or [line for line in experience if "," in line or _is_dump(line)]
+    raw_skills = skill_sources or experience[:2]
+    skills = _skill_pieces(raw_skills) or _tokens(" ".join(raw_skills))
+    roles = [role_line, *formation[:1], *_tokens(role_line)[:6]]
+    evidence = []
+    for line, section in sections:
+        if line in {role_line, *formation[:1], *skill_lines[:1]}:
+            evidence.append({"text": line[:240], "section": section})
+        if len(evidence) >= 4:
+            break
+    return [_area_from_dict({
+        "name": role_line[:80],
+        "search_query": " ".join([role_line, *skills[:3]]),
+        "search_tag": " ".join(_tokens(role_line)[:4]) or role_line,
+        "role_terms": roles,
+        "matched_skills": skills,
+        "confidence": "medium",
+        "evidence": evidence or [{"text": role_line[:240], "section": "perfil"}],
+    })]
+
+
+def extract_profile(text: str) -> tuple[str | None, list[dict], bool, list[str]]:
+    try:
+        payload = chat_json(PROFILE_SYSTEM, text[:7_000])
+        areas = _areas_from_payload(payload)
+        if areas:
+            name = str(payload.get("candidate_name") or "").strip() or extract_candidate_name(text)
+            return name, [_finalize_area(area, name) for area in areas], True, _string_list(payload.get("languages"))
+    except LLMError as error:
+        logger.warning("CV profile LLM failed: %s", error.__cause__ or error)
+    name = extract_candidate_name(text)
+    return name, [_finalize_area(area, name) for area in _areas_from_cv_text(text, name)], False, []
+
+def _profile_from_stored(profile: dict | None) -> tuple[str | None, list[dict], bool, list[str]] | None:
+    if not profile:
+        return None
+    name = str(profile.get("candidate_name") or "").strip() or None
+    areas = [_finalize_area(area, name) for area in _areas_from_payload(profile)]
+    if not areas:
+        return None
+    reliable = bool(profile.get("llm_used") or profile.get("edited"))
+    return name, areas, reliable, _string_list(profile.get("languages"))
+
+
+def edit_profile(profile: dict | None, candidate_name: str | None, edits: list[dict]) -> dict:
+    """Aplica as correções do utilizador. Uma área com outro nome deixa de herdar os termos que a IA lhe deu."""
+    current = {area["name"].casefold(): area for area in _areas_from_payload(profile or {})}
+    areas = []
+    for edit in edits:
+        base = current.get(edit["name"].casefold())
+        area = {**base, "matched_skills": edit["skills"]} if base else _area_from_dict(
+            {"name": edit["name"], "matched_skills": edit["skills"]}
         )
+        areas.append(_finalize_area(area, candidate_name))
+    return {
+        "candidate_name": candidate_name,
+        "areas": areas,
+        "languages": _string_list((profile or {}).get("languages")),
+        "llm_used": bool((profile or {}).get("llm_used")),
+        "edited": True,
+    }
 
-    return sorted(
-        detections,
-        key=lambda detection: (detection["confidence"] != "high", -len(detection["evidence"])),
-    )
+_RTF_TOKEN = re.compile(
+    r"\\([a-z]{1,32})(-?\d{1,10})?[ ]?|\\'([0-9a-f]{2})|\\([^a-z])|([{}])|[\r\n]+|(.)",
+    re.I,
+)
+
+
+def _decode_text(content: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
+
+
+def _zip_kind(content: bytes) -> str | None:
+    try:
+        names = zipfile.ZipFile(BytesIO(content)).namelist()
+    except zipfile.BadZipFile:
+        return None
+    if "word/document.xml" in names:
+        return "docx"
+    if "content.xml" in names:
+        return "odt"
+    return None
+
+
+_ocr = None
+
+
+def _image_kind(content: bytes) -> str | None:
+    if content.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
+        return "webp"
+    return None
+
+
+def _ocr_engine():
+    global _ocr
+    if _ocr is None:
+        from rapidocr import RapidOCR
+
+        _ocr = RapidOCR(params={"Rec.lang_type": "pt", "Global.log_level": "error"})
+    return _ocr
+
+
+def _image_text(content: bytes) -> str:
+    try:
+        result = _ocr_engine()(content)
+    except Exception as error:
+        logger.warning("CV OCR failed: %s", error)
+        raise ValueError("Não foi possível ler o CV em imagem. Tenta outra foto ou um PDF.") from error
+    texts = getattr(result, "txts", None) or ()
+    return "\n".join(part.strip() for part in texts if isinstance(part, str) and part.strip())
+
+
+def _format_of(filename: str, content: bytes) -> str:
+    extension = filename.rsplit(".", 1)[-1].casefold() if "." in filename else ""
+    if content.startswith(b"%PDF"):
+        return "pdf"
+    if content.lstrip().startswith(b"{\\rtf"):
+        return "rtf"
+    if content.startswith(b"PK"):
+        kind = _zip_kind(content)
+        if kind:
+            return kind
+    if content.startswith(b"\xd0\xcf\x11\xe0") or extension == "doc":
+        raise ValueError("Ficheiros .doc antigos não são suportados. Grava o CV em PDF, DOCX ou ODT.")
+    kind = _image_kind(content)
+    if kind:
+        return kind
+    if extension in IMAGE_KINDS:
+        return "jpg" if extension == "jpeg" else extension
+    if extension in {"pdf", "docx", "odt", "rtf", "txt", "md", "html", "htm"}:
+        return extension
+    raise ValueError("Formato não suportado. Usa PDF, DOCX, ODT, RTF, JPG, PNG ou um ficheiro de texto.")
+
+
+def _docx_text(content: bytes) -> str:
+    document = Document(BytesIO(content))
+    paragraphs = [paragraph.text for paragraph in document.paragraphs]
+    table_cells = [cell.text for table in document.tables for row in table.rows for cell in row.cells]
+    return "\n".join(paragraphs + table_cells)
+
+
+def _odt_text(content: bytes) -> str:
+    with zipfile.ZipFile(BytesIO(content)) as archive:
+        xml = archive.read("content.xml")
+    parts = []
+    for node in ET.fromstring(xml).iter():
+        if node.text and node.text.strip():
+            parts.append(node.text.strip())
+        if node.tail and node.tail.strip():
+            parts.append(node.tail.strip())
+    return "\n".join(parts)
+
+
+def _rtf_text(content: bytes) -> str:
+    stack: list[bool] = []
+    ignorable = False
+    out: list[str] = []
+    for control, _number, hexcode, escaped, brace, plain in _RTF_TOKEN.findall(_decode_text(content)):
+        if brace == "{":
+            stack.append(ignorable)
+        elif brace == "}":
+            ignorable = stack.pop() if stack else False
+        elif hexcode and not ignorable:
+            out.append(bytes.fromhex(hexcode).decode("cp1252", errors="ignore"))
+        elif control in {"*", "fonttbl", "colortbl", "stylesheet", "info", "pict"}:
+            ignorable = True
+        elif control in {"par", "line"} and not ignorable:
+            out.append("\n")
+        elif control == "tab" and not ignorable:
+            out.append("\t")
+        elif escaped and not ignorable:
+            out.append(escaped)
+        elif plain and not ignorable:
+            out.append(plain)
+    return "".join(out)
+
+
+def _html_text(content: bytes) -> str:
+    raw = _decode_text(content)
+    raw = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", raw)
+    raw = re.sub(r"<[^>]+>", "\n", raw)
+    return re.sub(r"\n{3,}", "\n\n", html.unescape(raw))
+
+
+def extract_cv_text(filename: str, content: bytes) -> str:
+    kind = _format_of(filename, content)
+    if kind == "pdf":
+        pages = PdfReader(BytesIO(content)).pages
+        text = "\n".join(page.extract_text() or "" for page in pages)
+    elif kind == "docx":
+        text = _docx_text(content)
+    elif kind == "odt":
+        text = _odt_text(content)
+    elif kind == "rtf":
+        text = _rtf_text(content)
+    elif kind in {"html", "htm"}:
+        text = _html_text(content)
+    elif kind in {"jpg", "png", "webp"}:
+        text = _image_text(content)
+    else:
+        text = _decode_text(content)
+
+    text = text.strip()
+    if not text:
+        if kind in {"jpg", "png", "webp"}:
+            raise ValueError("Não foi possível ler texto na imagem. Tira uma foto mais nítida ou usa PDF/DOCX.")
+        raise ValueError("Não foi possível extrair texto. Ficheiros digitalizados como imagem não são suportados.")
+
+    return text[:100_000]
 
 
 def extract_candidate_name(text: str) -> str | None:
     """O nome costuma ser a primeira linha do CV; rejeita linhas que não pareçam um nome."""
     for line in text.splitlines():
         line = line.strip()
-        if not line:
-            continue
-        words = line.split()
-        looks_like_name = (
-            2 <= len(words) <= 5
-            and len(line) <= 60
-            and not re.search(r"[\d@:/|,]", line)
-            and all(word[0].isalpha() for word in words)
-        )
-        return line if looks_like_name else None
+        if line:
+            return line if _looks_like_person_name(line) else None
     return None
-
-
-def analyze_cv(filename: str, content: bytes, location: str = "Portugal") -> dict:
-    if len(content) > MAX_CV_BYTES:
-        raise ValueError("O CV excede o limite de 5 MB.")
-
-    text = extract_cv_text(filename, content)
-    candidate_name = extract_candidate_name(text)
-    areas = analyze_cv_text(text)
-    suggestions = []
-    search_errors = []
-    excluded_location_count = 0
-    seen_jobs = set()
-
-    area_configs = {area["key"]: area for area in CAREER_AREAS}
-    cv_skills = list(dict.fromkeys(skill for area in areas for skill in area["matched_skills"]))
-    normalized_cv_skills = {_normalize(skill) for skill in cv_skills}
-    for area in areas[:MAX_SEARCH_AREAS]:
-        area_config = area_configs[area["key"]]
-        jobs, failed_sources = search_all_sources(
-            area_config["search_tag"], location=location, limit=JOBS_PER_AREA
-        )
-        search_errors.extend(f"{area['name']} ({source})" for source in failed_sources)
-
-        for job in jobs:
-            company = (job.get("company") or "").strip()
-            title = (job.get("title") or "").strip()
-            url = (job.get("url") or "").strip()
-            job_location = (job.get("location") or "").strip()
-            if not company or not title or not url:
-                continue
-
-            location_priority = _location_priority(job_location, location)
-            if location_priority not in {0, 1, 3}:
-                excluded_location_count += 1
-                continue
-
-            normalized_title = _normalize(title)
-            normalized_industries = [_normalize(item) for item in job.get("industry", [])]
-            normalized_excerpt = _normalize(job.get("excerpt") or "")
-            searchable_text = " ".join([normalized_title, *normalized_industries, normalized_excerpt])
-            role_matches = [
-                term for term in area_config["role_terms"]
-                if _has_term(normalized_title, term)
-            ]
-            skill_matches = [
-                skill for skill in cv_skills
-                if _has_term(searchable_text, skill)
-            ]
-            title_skill_matches = [skill for skill in skill_matches if _has_term(normalized_title, skill)]
-            industry_match = any(
-                _normalize(industry) in job_industry
-                for industry in area_config["industries"]
-                for job_industry in normalized_industries
-            )
-            if not role_matches and not (industry_match and skill_matches):
-                continue
-
-            foreign_stack = [
-                term for term in OTHER_STACK_TERMS
-                if _normalize(term) not in normalized_cv_skills and _has_term(normalized_title, term)
-            ]
-            if foreign_stack and not title_skill_matches:
-                continue
-            if not skill_matches:
-                continue
-
-            key = (company.casefold(), url)
-            if key in seen_jobs:
-                continue
-            seen_jobs.add(key)
-            suggestions.append(
-                {
-                    "company": company,
-                    "title": title,
-                    "location": job_location or "Localização não confirmada",
-                    "email": None,
-                    "location_priority": location_priority,
-                    "url": url,
-                    "area": area["name"],
-                    "source": job.get("source", "Desconhecida"),
-                    "matched_skills": skill_matches,
-                    "match_score": len(role_matches) * 4 + len(title_skill_matches) * 3 + len(skill_matches) * 2 + (2 if industry_match else 0),
-                }
-            )
-
-    suggestions.sort(
-        key=lambda suggestion: (
-            suggestion["location_priority"],
-            -suggestion["match_score"],
-        )
-    )
-    unique_suggestions = []
-    seen_companies = set()
-    for suggestion in suggestions:
-        company_key = _normalize(suggestion["company"])
-        if company_key in seen_companies:
-            continue
-        seen_companies.add(company_key)
-        unique_suggestions.append(suggestion)
-
-    return {
-        "candidate_name": candidate_name,
-        "areas": areas,
-        "suggestions": unique_suggestions,
-        "location_priority_order": [
-            "Localização exata",
-            "Também elegível na localização escolhida",
-            "Região compatível",
-            "Remoto/global",
-            "Localização por confirmar",
-        ],
-        "excluded_location_count": excluded_location_count,
-        "search_errors": search_errors,
-        "cv_saved": False,
-        "excluded_location_count": excluded_location_count,
-    }

@@ -19,6 +19,7 @@ import app.models.ContactJobPosting
 import app.models.LocationJobPosting
 import app.models.SkillsJobPosting
 import app.models.User
+import app.models.UserJobPosting    
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

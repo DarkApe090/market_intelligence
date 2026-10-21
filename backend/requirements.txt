@@ -25,10 +25,12 @@ email-validator>=2.0
 python-multipart>=0.0.20
 pypdf>=5.9.0
 python-docx>=1.2.0
+rapidocr>=3.10.0
+onnxruntime>=1.31.0
 playwright>=1.55.0
 pytest
 httpx
+truststore>=0.10.0
 langgraph>=1.0.0
-playwright>=1.40.0
 
 cryptography>=45.0.0

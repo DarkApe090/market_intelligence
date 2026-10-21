@@ -10,25 +10,28 @@ class LLMError(RuntimeError):
 
 
 def chat_json(system: str, prompt: str) -> dict:
+    """Chat Completions compatível com OpenAI: serve o Ollama local e fornecedores alojados (ex.: Mistral)."""
     payload = {
-        "model": settings.ollama_model,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.2},
+        "model": settings.llm_model,
+        "temperature": 0.2,
+        "max_tokens": 1024,
+        "response_format": {"type": "json_object"},
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
     }
+    headers = {"Authorization": f"Bearer {settings.llm_api_key}"} if settings.llm_api_key else {}
     try:
         response = httpx.post(
-            f"{settings.ollama_url.rstrip('/')}/api/chat",
+            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
             json=payload,
-            timeout=settings.ollama_timeout,
+            headers=headers,
+            timeout=settings.llm_timeout,
         )
         response.raise_for_status()
-        return json.loads(response.json()["message"]["content"])
+        return json.loads(response.json()["choices"][0]["message"]["content"])
     except httpx.HTTPError as error:
-        raise LLMError("Não foi possível contactar o modelo de IA. Confirma que o Ollama está a correr.") from error
-    except (KeyError, ValueError) as error:
+        raise LLMError("Não foi possível contactar o modelo de IA. Tenta de novo daqui a pouco.") from error
+    except (KeyError, IndexError, ValueError) as error:
         raise LLMError("O modelo devolveu uma resposta inválida.") from error

@@ -1,6 +1,7 @@
-from sqlalchemy import String, ForeignKey
+from sqlalchemy import ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 from app.database.base import Base
+from app.models.Location import Location  # noqa: F401
 
 class CompanyLocation(Base):
     __tablename__="company_locations"

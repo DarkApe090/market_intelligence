@@ -1,4 +1,4 @@
-from app.scrappers.common import build_job, get_cached_json, matches_tag
+from app.scrappers.common import build_job, get_cached_json, is_european_market, matches_tag
 
 
 API_URL = "https://www.arbeitnow.com/api/job-board-api"
@@ -20,6 +20,8 @@ def search_jobs(tag: str, location: str, limit: int = 10) -> list[dict]:
             job_location = f"{job['location']}, Germany"
         else:
             job_location = "Germany"
+        if job_location != "Remote" and not is_european_market(job_location, requested=location):
+            continue
 
         built = build_job(
             company=job.get("company_name"),

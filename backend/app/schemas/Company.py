@@ -1,7 +1,10 @@
 import ipaddress
+import re
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, field_validator
+
+EMAIL_VALUE = re.compile(r"[^@\s]+@[^@\s]+\.[a-z]{2,}$", re.IGNORECASE)
 
 
 class CreateCompany(BaseModel):
@@ -27,6 +30,8 @@ class FindEmailRequest(BaseModel):
             return None
 
         website = value.strip()
+        if EMAIL_VALUE.fullmatch(website):
+            return website.casefold()
         if not website.startswith(("http://", "https://")):
             website = f"https://{website}"
 
