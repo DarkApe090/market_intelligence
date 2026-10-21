@@ -1,5 +1,5 @@
 from app.models.Company import Company
-from app.scrappers import job_sources
+from app.scrappers import email_finder
 from app.services import ContactEnrichment
 
 
@@ -24,7 +24,111 @@ def test_save_suggestion_is_idempotent_and_links_outreach(client, monkeypatch):
     assert second.json()["already_in_outreach"] is True
     assert second.json()["id_jobPosting"] == first.json()["id_jobPosting"]
     assert len(client.get("/companies/outreach/contacts").json()) == 1
-    assert len(client.get("/jobpostings/").json()) == 1
+    linked = client.get("/user-jobpostings/").json()
+    assert len(linked) == 1
+    assert linked[0]["id_jobPosting"] == first.json()["id_jobPosting"]
+    assert linked[0]["seen_at"] is None
+    outreach = client.get("/companies/outreach/contacts").json()[0]
+    assert outreach["id_jobPosting"] == first.json()["id_jobPosting"]
+    assert outreach["job_title"] == "Software Engineer"
+    assert outreach["job_seen_at"] is None
+
+
+def test_save_without_email_starts_async_enrich(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.controllers.CareerProfile.enrich_company",
+        lambda id_company, website_url=None, force=False: calls.append((id_company, force)),
+    )
+    saved = client.post("/career-profile/suggestions/save", json=SUGGESTION).json()
+    assert calls == [(saved["id_company"], True)]
+
+    client.post("/career-profile/suggestions/save", json={**SUGGESTION, "title": "Outra vaga", "url": "https://example.com/job/2"})
+    assert calls == [(saved["id_company"], True)]
+
+
+def test_save_suggestion_drops_sales_email(client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    saved = client.post(
+        "/career-profile/suggestions/save",
+        json={**SUGGESTION, "email": "sales@acme.com"},
+    ).json()
+    assert saved["email"] is None
+    assert client.get("/companies/outreach/contacts").json()[0]["email"] is None
+
+
+def test_save_with_email_skips_enrich(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.controllers.CareerProfile.enrich_company",
+        lambda *args, **kwargs: calls.append(args),
+    )
+    client.post("/career-profile/suggestions/save", json={**SUGGESTION, "email": "jobs@acme.com"})
+    assert calls == []
+
+
+def test_new_contact_without_email_starts_async_enrich(client, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "app.controllers.CompanyContact.enrich_company",
+        lambda id_company, website_url=None, force=False: calls.append((id_company, website_url, force)),
+    )
+    company = client.post("/companies/", json={"name_company": "Acme"}).json()
+    contact = client.post("/contacts/", json={
+        "name_contact": None,
+        "role_contact": None,
+        "contact_type": "careers",
+        "email": None,
+        "source_url": "https://acme.com",
+    }).json()
+    response = client.post(f"/companies/{company['id_company']}/contacts/{contact['id_contact']}")
+    assert response.status_code == 201
+    assert calls == [(company["id_company"], "https://acme.com", True)]
+
+
+def test_save_suggestion_links_the_same_job_to_each_user(make_client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    first_user = make_client(sub="user-a", email="a@example.com")
+    second_user = make_client(sub="user-b", email="b@example.com")
+
+    first = first_user.post("/career-profile/suggestions/save", json=SUGGESTION).json()
+    second = second_user.post("/career-profile/suggestions/save", json=SUGGESTION).json()
+
+    assert first["id_jobPosting"] == second["id_jobPosting"]
+    assert len(first_user.get("/user-jobpostings/").json()) == 1
+    assert len(second_user.get("/user-jobpostings/").json()) == 1
+    assert first_user.get("/companies/outreach/contacts").json()[0]["id_jobPosting"] == first["id_jobPosting"]
+    assert second_user.get("/companies/outreach/contacts").json()[0]["id_jobPosting"] == first["id_jobPosting"]
+
+
+def test_find_email_saves_pasted_email(client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    saved = client.post("/career-profile/suggestions/save", json=SUGGESTION).json()
+
+    response = client.post(
+        f"/companies/{saved['id_company']}/find-email",
+        json={"website_url": "info@acme.com"},
+    )
+
+    assert response.status_code in {200, 202}
+    assert response.json()["email"] == "info@acme.com"
+    contact = client.get("/companies/outreach/contacts").json()[0]
+    assert contact["email"] == "info@acme.com"
+    assert contact["outreach_status"] == "to_contact"
+    assert contact["contact_type"] == "general"
+
+
+def test_find_email_rejects_sales_address(client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    saved = client.post("/career-profile/suggestions/save", json=SUGGESTION).json()
+
+    response = client.post(
+        f"/companies/{saved['id_company']}/find-email",
+        json={"website_url": "sales@acme.com"},
+    )
+
+    assert response.status_code == 400
+    assert client.get("/companies/outreach/contacts").json()[0]["email"] is None
 
 
 def test_find_email_rejects_ip_addresses(client):
@@ -46,7 +150,10 @@ def test_find_email_requires_existing_company(client):
 
 def test_enrich_company_fills_email_and_marks_missing(client, monkeypatch):
     monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
-    saved = client.post("/career-profile/suggestions/save", json=SUGGESTION).json()
+    saved = client.post(
+        "/career-profile/suggestions/save",
+        json={**SUGGESTION, "url": "https://www.itjobs.pt/oferta/1"},
+    ).json()
 
     session_factory = client.app.dependency_overrides
     db_generator = next(iter(session_factory.values()))()
@@ -54,7 +161,8 @@ def test_enrich_company_fills_email_and_marks_missing(client, monkeypatch):
     monkeypatch.setattr(ContactEnrichment, "SessionLocal", lambda: db)
     monkeypatch.setattr(db, "close", lambda: None)
 
-    monkeypatch.setattr(ContactEnrichment, "guess_website", lambda name: "https://acme.com")
+    monkeypatch.setattr(email_finder, "fetch_page", lambda url: None)
+    monkeypatch.setattr(ContactEnrichment, "guess_website", lambda name, location=None: "https://acme.com")
     monkeypatch.setattr(
         ContactEnrichment,
         "find_company_email",
@@ -79,27 +187,117 @@ def test_enrich_company_fills_email_and_marks_missing(client, monkeypatch):
     assert statuses["Beta"] == "no_email"
 
 
-def test_search_all_sources_tolerates_a_failing_source(monkeypatch):
-    class Good:
-        SOURCE_NAME = "Good"
+def test_enrich_finds_site_from_job_url_when_name_does_not_guess(client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    saved = client.post("/career-profile/suggestions/save", json={
+        **SUGGESTION,
+        "company": "Nimbus",
+        "url": "https://nimbus.dev/jobs/backend",
+    }).json()
 
-        @staticmethod
-        def search_jobs(tag, location, limit):
-            return [{"company": "A", "title": "T", "url": "u"}]
+    session_factory = client.app.dependency_overrides
+    db_generator = next(iter(session_factory.values()))()
+    db = next(db_generator)
+    monkeypatch.setattr(ContactEnrichment, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(email_finder, "fetch_page", lambda url: None)
+    monkeypatch.setattr(ContactEnrichment, "guess_website", lambda name, location=None: None)
+    monkeypatch.setattr(
+        ContactEnrichment,
+        "find_company_email",
+        lambda website: ("jobs@nimbus.dev", "careers", f"{website}/careers"),
+    )
+    ContactEnrichment.enrich_company(saved["id_company"])
 
-    class Bad:
-        SOURCE_NAME = "Bad"
+    contact = client.get("/companies/outreach/contacts").json()[0]
+    assert contact["email"] == "jobs@nimbus.dev"
+    assert contact["website_url"] == "https://nimbus.dev"
 
-        @staticmethod
-        def search_jobs(tag, location, limit):
-            raise RuntimeError("down")
 
-    monkeypatch.setattr(job_sources, "JOB_SOURCES", (Good, Bad))
+def test_enrich_uses_job_ad_email_instead_of_guessed_mailbox(client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    saved = client.post("/career-profile/suggestions/save", json={
+        **SUGGESTION,
+        "company": "Fyld",
+        "url": "https://fyld.pt/job-apply/net-developer",
+    }).json()
 
-    jobs, failed = job_sources.search_all_sources("software", "Portugal", 5)
+    session_factory = client.app.dependency_overrides
+    db_generator = next(iter(session_factory.values()))()
+    db = next(db_generator)
+    monkeypatch.setattr(ContactEnrichment, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(
+        email_finder,
+        "fetch_page",
+        lambda url: "Send your CV to join@fyld.pt or the DPO at dpo@fyld.pt" if "fyld.pt" in url else None,
+    )
+    monkeypatch.setattr(ContactEnrichment, "guess_website", lambda name, location=None: "https://fyld.com")
+    monkeypatch.setattr(
+        ContactEnrichment,
+        "find_company_email",
+        lambda website: ("fyld@fyld.com", "general", "https://fyld.com/"),
+    )
+    ContactEnrichment.enrich_company(saved["id_company"])
 
-    assert len(jobs) == 1
-    assert failed == ["Bad"]
+    contact = client.get("/companies/outreach/contacts").json()[0]
+    assert contact["email"] == "join@fyld.pt"
+    assert contact["contact_type"] == "careers"
+    assert contact["website_url"] == "https://fyld.pt"
+
+
+def test_enrich_uses_company_site_when_job_board_listing_has_no_email(client, monkeypatch):
+    monkeypatch.setattr("app.controllers.CareerProfile.enrich_company", lambda *args, **kwargs: None)
+    saved = client.post("/career-profile/suggestions/save", json={
+        **SUGGESTION,
+        "company": "We are META",
+        "url": "https://www.net-empregos.com/16100000/net-developer/",
+    }).json()
+
+    session_factory = client.app.dependency_overrides
+    db_generator = next(iter(session_factory.values()))()
+    db = next(db_generator)
+    monkeypatch.setattr(ContactEnrichment, "SessionLocal", lambda: db)
+    monkeypatch.setattr(db, "close", lambda: None)
+    monkeypatch.setattr(email_finder, "fetch_page", lambda url: "Net-Empregos oferta sem contacto")
+    monkeypatch.setattr(ContactEnrichment, "guess_website", lambda name, location=None: "https://wearemeta.io")
+    monkeypatch.setattr(
+        ContactEnrichment,
+        "find_company_email",
+        lambda website: ("sayhello@wearemeta.io", "general", f"{website}/about")
+        if "wearemeta.io" in website
+        else ("info@net-empregos.com", "general", website),
+    )
+    ContactEnrichment.enrich_company(saved["id_company"], "https://www.net-empregos.com", True)
+
+    contact = client.get("/companies/outreach/contacts").json()[0]
+    assert contact["email"] == "sayhello@wearemeta.io"
+    assert contact["website_url"] == "https://wearemeta.io"
+
+
+def test_fill_suggestion_emails_uses_job_page_then_company_site(monkeypatch):
+    from app.scrappers import email_finder
+    from app.services.ContactEnrichment import fill_suggestion_emails
+
+    pages = {"https://jobs.example/vaga": "info@acme.com"}
+    monkeypatch.setattr(email_finder, "fetch_page", lambda url: pages.get(url))
+    monkeypatch.setattr(email_finder, "guess_website", lambda name, location=None: "https://beta.pt")
+    monkeypatch.setattr(
+        email_finder,
+        "find_company_email",
+        lambda website, use_browser=True: ("contacto@beta.pt", "careers", "https://beta.pt/contactos")
+        if website == "https://beta.pt"
+        else None,
+    )
+
+    suggestions = [
+        {"company": "Acme", "url": "https://jobs.example/vaga", "email": None},
+        {"company": "Beta", "url": "https://jobs.example/sem-email", "email": None},
+    ]
+    fill_suggestion_emails(suggestions)
+
+    assert suggestions[0]["email"] == "info@acme.com"
+    assert suggestions[1]["email"] == "contacto@beta.pt"
 
 
 def test_remove_company_from_outreach_cleans_related_rows(client, monkeypatch):

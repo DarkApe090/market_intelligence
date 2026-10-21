@@ -70,7 +70,10 @@ def test_company_contact_list_includes_outreach_details(client):
             "name_company": "Empresa de teste",
             "website_url": None,
             "job_title": None,
+            "id_jobPosting": None,
+            "job_seen_at": None,
             "outreach_status": "to_contact",
+            "sent_at": None,
             **contacts_response.json()[0],
         }
     ]
@@ -82,3 +85,12 @@ def test_company_contact_list_includes_outreach_details(client):
 
     assert status_response.status_code == 200
     assert status_response.json()["outreach_status"] == "sent"
+
+    rejected = client.patch(
+        f"/companies/{company_id}/contacts/{contact_id}/status",
+        json={"outreach_status": "rejected"},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["outreach_status"] == "rejected"
+    listed = client.get("/companies/outreach/contacts").json()
+    assert listed[0]["outreach_status"] == "rejected"

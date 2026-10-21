@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -5,9 +7,21 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.database.base import Base
+from app.services.JobSearch import fold_analysis
 from app.database.connection import get_db
 from app.main import app
 from app.services import Auth
+
+
+def analysis_from_response(response):
+    if "text/event-stream" in response.headers.get("content-type", ""):
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.startswith("data: ")
+        ]
+        return fold_analysis(events)
+    return response.json()
 
 @pytest.fixture
 def db_session_factory():
@@ -67,4 +81,11 @@ def no_browser_fallback(monkeypatch):
     from app.scrappers import email_finder
 
     monkeypatch.setattr(email_finder, "USE_BROWSER_FALLBACK", False)
+    monkeypatch.setattr(email_finder, "fetch_page", lambda url: None)
+    monkeypatch.setattr(email_finder, "guess_website", lambda name, location=None: None)
+
+
+@pytest.fixture(autouse=True)
+def no_teamlyzer_lookup(monkeypatch):
+    monkeypatch.setattr("app.services.JobSearch.lookup_company", lambda name: None)
 

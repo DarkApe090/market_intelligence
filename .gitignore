@@ -14,6 +14,7 @@ backend/**/*.py[cod]
 
 # Secrets / private data
 backend/data/google_token.json
+backend/data/secret.key
 backend/data/cv/
 
 # ==========================================
